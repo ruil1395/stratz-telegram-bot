@@ -2,12 +2,11 @@
 
 Telegram бот для получения статистики Dota 2 с сайта [Stratz.com](https://stratz.com)
 
-## 🎮 Возможности
+## ⚠️ Важно для Windows пользователей
 
-- 📊 Статистика игроков (JSON/CSV)
-- 🎮 Детали матчей в CSV
-- 🏆 Список про-игроков
-- 📁 Выгрузка данных в файлы
+При клонировании на Windows файлы `env_example.txt` и `gitignore.txt` нужно переименовать:
+- `env_example.txt` → `.env`
+- `gitignore.txt` → `.gitignore`
 
 ## 🚀 Установка
 
