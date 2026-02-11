@@ -5,7 +5,8 @@ import json
 import csv
 import io
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from flask import Flask, request
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Bot
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # Настройка логирования
@@ -15,10 +16,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Конфигурация
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
-STRATZ_TOKEN = os.getenv("STRATZ_TOKEN", "YOUR_STRATZ_API_TOKEN")
+# Flask приложение (для webhook)
+app = Flask(__name__)
+
+# Конфигурация из переменных окружения Amvera
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+STRATZ_TOKEN = os.getenv("STRATZ_TOKEN")
 STRATZ_API_URL = "https://api.stratz.com/graphql"
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # URL от Amvera (например, https://your-app.amvera.io)
+
+# Инициализация бота
+bot = Bot(token=TELEGRAM_TOKEN)
+application = Application.builder().token(TELEGRAM_TOKEN).build()
 
 # GraphQL запросы
 PLAYER_FULL_QUERY = """
@@ -78,7 +87,6 @@ query GetMatch($matchId: Long!) {
       experiencePerMinute
       heroDamage
       towerDamage
-      heroHealing
     }
   }
 }
@@ -126,17 +134,16 @@ class StratzAPI:
 
 stratz_api = StratzAPI(STRATZ_TOKEN)
 
-def save_json(data, filename):
-    """Сохраняет данные в JSON файл"""
+def save_json(data):
+    """Сохраняет данные в JSON файл в памяти"""
     json_str = json.dumps(data, ensure_ascii=False, indent=2)
     return io.BytesIO(json_str.encode('utf-8'))
 
-def matches_to_csv(matches, player_id):
+def matches_to_csv(matches):
     """Конвертирует матчи в CSV"""
     output = io.StringIO()
     writer = csv.writer(output)
     
-    # Заголовки
     writer.writerow([
         'Match ID', 'Date', 'Hero', 'Result', 'Kills', 'Deaths', 'Assists',
         'Networth', 'GPM', 'XPM', 'Duration(min)', 'Game Mode'
@@ -145,8 +152,6 @@ def matches_to_csv(matches, player_id):
     for match in matches:
         player_data = match['players'][0]
         hero = player_data['hero']['displayName']
-        
-        # Определяем результат
         is_win = (match['didRadiantWin'] and player_data['isRadiant']) or \
                  (not match['didRadiantWin'] and not player_data['isRadiant'])
         result = 'Win' if is_win else 'Loss'
@@ -213,6 +218,7 @@ def pro_players_to_csv(players):
     
     return io.BytesIO(output.getvalue().encode('utf-8'))
 
+# Обработчики команд
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("👤 Статистика игрока (файл)", callback_data='player_file')],
@@ -234,7 +240,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎮 *Команды для получения файлов:*
 
 /player_json <Steam ID> - Полная статистика в JSON
-/player_csv <Steam ID> - Последние матчи в CSV
+/player_csv <Steam ID> - История матчей в CSV
 /match_csv <Match ID> - Детали матча в CSV
 /pro_csv - Список про-игроков в CSV
 
@@ -260,13 +266,9 @@ async def get_player_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     player_data = result['data']['player']
-    
-    # Формируем имя файла
     player_name = player_data.get('name', 'unknown').replace(' ', '_')
     filename = f"player_{player_name}_{steam_id}_{datetime.now().strftime('%Y%m%d')}.json"
-    
-    # Создаем файл в памяти
-    file_obj = save_json(player_data, filename)
+    file_obj = save_json(player_data)
     
     await update.message.reply_document(
         document=InputFile(file_obj, filename=filename),
@@ -295,10 +297,9 @@ async def get_player_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Нет матчей")
         return
     
-    # Создаем CSV
     player_name = player_data.get('name', 'unknown').replace(' ', '_')
     filename = f"matches_{player_name}_{steam_id}_{datetime.now().strftime('%Y%m%d')}.csv"
-    file_obj = matches_to_csv(matches, steam_id)
+    file_obj = matches_to_csv(matches)
     
     await update.message.reply_document(
         document=InputFile(file_obj, filename=filename),
@@ -321,11 +322,8 @@ async def get_match_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     match_data = result['data']['match']
-    
-    # Создаем CSV
     filename = f"match_{match_id}_{datetime.now().strftime('%Y%m%d')}.csv"
     file_obj = match_to_csv(match_data)
-    
     winner = "Radiant" if match_data['didRadiantWin'] else "Dire"
     
     await update.message.reply_document(
@@ -349,7 +347,6 @@ async def get_pro_players_csv(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Список пуст")
         return
     
-    # Создаем CSV
     filename = f"pro_players_{datetime.now().strftime('%Y%m%d')}.csv"
     file_obj = pro_players_to_csv(players)
     
@@ -374,31 +371,4 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "`/match_csv <Match ID>` - Данные матча в CSV",
             parse_mode='Markdown'
         )
-    elif query.data == 'pro_players':
-        await get_pro_players_csv(update, context)
-    elif query.data == 'help':
-        await help_command(update, context)
-
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Error: {context.error}")
-    if update and update.effective_message:
-        await update.effective_message.reply_text("❌ Ошибка. Попробуйте позже.")
-
-def main():
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    # Команды для файлов
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("player_json", get_player_json))
-    application.add_handler(CommandHandler("player_csv", get_player_csv))
-    application.add_handler(CommandHandler("match_csv", get_match_csv))
-    application.add_handler(CommandHandler("pro_csv", get_pro_players_csv))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_error_handler(error_handler)
-    
-    print("🤖 Бот запущен...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == "__main__":
-    main()
+    elif query.data == 'pro_players
